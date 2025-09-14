@@ -56,7 +56,7 @@ jobs:
       - name: Create release
         uses: ncipollo/release-action@v1
         with:
-          tag: run-${{ github.run_id }}${{ github.run_attempt == 1 && '' || format('-{0}', github.run_attempt) }}
+          tag: run-${{ github.run_id }}${{ github.run_attempt == '1' && '' || format('-{0}', github.run_attempt) }}
           name: Release ${{ steps.date.outputs.date }}
           token: ${{ secrets.GITHUB_TOKEN }}
           makeLatest: true
