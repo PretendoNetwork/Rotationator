@@ -1,10 +1,5 @@
 ﻿using System.CommandLine;
-using System.CommandLine.Invocation;
-using System.Text.Json;
-using OatmealDome.BinaryData;
-using OatmealDome.NinLib.Byaml;
-using OatmealDome.NinLib.Byaml.Dynamic;
-using Rotationator;
+using Rotationator.Commands;
 
 //
 // Constants
@@ -13,67 +8,26 @@ using Rotationator;
 const int defaultPhaseLength = 4;
 const int defaultScheduleLength = 30;
 
-Dictionary<VersusRule, List<int>> bannedStages = new Dictionary<VersusRule, List<int>>()
-{
-    {
-        VersusRule.Paint,
-        new List<int>() // nothing banned
-    },
-    {
-        VersusRule.Goal,
-        new List<int>()
-        {
-            2, // Saltspray Rig
-            4, // Blackbelly Skatepark
-            14 // Piranha Pit
-        }
-    },
-    {
-        VersusRule.Area,
-        new List<int>() // nothing banned
-    },
-    {
-        VersusRule.Lift,
-        new List<int>()
-        {
-            2, // Saltspray Rig
-            6, // Port Mackerel
-        }
-    }
-};
-
-List<int> defaultStagePool = new List<int>()
-{
-    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15
-};
-
-List<VersusRule> defaultGachiRulePool = new List<VersusRule>()
-{
-    VersusRule.Goal,
-    VersusRule.Area,
-    VersusRule.Lift
-};
 
 //
 // Command handling
 //
 
-Argument<string> lastByamlArg = new Argument<string>("lastByaml", "The last VSSetting BYAML file.");
-
-Argument<string> outputByamlArg = new Argument<string>("outputByaml", "The output VSSetting BYAML file.");
-
-Option<int> phaseLengthOption =
+var lastByamlArg = new Argument<string>("lastByaml", "The last VSSetting BYAML file.");
+var outputByamlArg = new Argument<string>("outputByaml", "The output VSSetting BYAML file.");
+var phaseLengthOption =
     new Option<int>("--phaseLength", () => defaultPhaseLength, "The length of each phase in hours.");
-
-Option<int> scheduleLengthOption = new Option<int>("--scheduleLength", () => defaultScheduleLength,
+var scheduleLengthOption = new Option<int>("--scheduleLength", () => defaultScheduleLength,
     "How long the schedule should be in days.");
-
-Option<string?> overridePhasesOption =
+var overridePhasesOption =
     new Option<string?>("--overridePhases", () => null, "The override phases file.");
+var seedOption = new Option<uint?>("--randomSeed", () => null, "The seed for the random number generator.");
 
-Option<uint?> seedOption = new Option<uint?>("--randomSeed", () => null, "The seed for the random number generator.");
+var byamlArgument = new Argument<string>("byaml", "The BYAML file to process.");
 
-Command command = new RootCommand("Generates a new VSSetting BYAMl file.")
+RootCommand rootCommand = new();
+
+Command generateCommand = new("generate", "Generates a new VSSetting BYAMl file.")
 {
     lastByamlArg,
     outputByamlArg,
@@ -82,16 +36,7 @@ Command command = new RootCommand("Generates a new VSSetting BYAMl file.")
     overridePhasesOption,
     seedOption
 };
-
-command.SetHandler(context => Run(context));
-
-command.Invoke(args);
-
-//
-// Entrypoint
-//
-
-void Run(InvocationContext context)
+generateCommand.SetHandler(context =>
 {
     string lastByamlPath = context.ParseResult.GetValueForArgument(lastByamlArg);
     string outputByamlPath = context.ParseResult.GetValueForArgument(outputByamlArg);
@@ -99,454 +44,20 @@ void Run(InvocationContext context)
     int scheduleLength = context.ParseResult.GetValueForOption(scheduleLengthOption);
     string? overridePhasesPath = context.ParseResult.GetValueForOption(overridePhasesOption);
     uint? specifiedSeed = context.ParseResult.GetValueForOption(seedOption);
-
-    uint seed = specifiedSeed ?? (uint)Environment.TickCount;
-    SeadRandom random = new SeadRandom(seed);
     
-    Console.WriteLine("Random seed: " + seed);
-    
-    dynamic lastByaml = ByamlFile.Load(lastByamlPath);
-    
-    DateTime lastBaseTime = DateTime.Parse(lastByaml["DateTime"]).ToUniversalTime();
-    List<dynamic> lastPhases = lastByaml["Phases"];
-    
-    //
-    // Find phase start point
-    //
-    
-    DateTime referenceNow = DateTime.UtcNow;
-    
-    DateTime loopTime = lastBaseTime;
+    GenerateCommand.Run(lastByamlPath, outputByamlPath, phaseLength, scheduleLength, overridePhasesPath, specifiedSeed);
+});
+rootCommand.AddCommand(generateCommand);
 
-    DateTime baseTime;
-    List<GambitVersusPhase> currentPhases;
-
-    if (lastPhases.Count > 0)
-    {
-        int lastPhasesStartIdx = -1;
-
-        for (int i = 0; i < lastPhases.Count; i++)
-        {
-            Dictionary<string, dynamic> phase = lastPhases[i];
-
-            DateTime phaseEndTime = loopTime.AddHours((int)phase["Time"]);
-
-            if (referenceNow >= loopTime && phaseEndTime > referenceNow)
-            {
-                lastPhasesStartIdx = i;
-                break;
-            }
-
-            loopTime = phaseEndTime;
-        }
-        
-        if (lastPhasesStartIdx != -1)
-        {
-            baseTime = loopTime;
-            currentPhases = lastPhases.Skip(lastPhasesStartIdx).Select(p => new GambitVersusPhase(p)).ToList();
-        }
-        else
-        {
-            throw new NotImplementedException("not supported yet");
-        }
-        
-        // The last phase is set to 10 years, so correct this to the correct phase length.
-        currentPhases.Last().Length = phaseLength;
-    }
-    else
-    {
-        baseTime = lastBaseTime;
-        currentPhases = new List<GambitVersusPhase>();
-    }
-    
-    //
-    // Load the override phases
-    //
-
-    Dictionary<DateTime, OverridePhase> overridePhases;
-
-    if (overridePhasesPath != null)
-    {
-        string overridePhasesJson = File.ReadAllText(overridePhasesPath);
-        Dictionary<string, OverridePhase> overridePhasesStrKey =
-            JsonSerializer.Deserialize<Dictionary<string, OverridePhase>>(overridePhasesJson)!;
-
-        overridePhases = overridePhasesStrKey.Select(p =>
-            new KeyValuePair<DateTime, OverridePhase>(DateTime.Parse(p.Key).ToUniversalTime(), p.Value)).ToDictionary();
-        
-        Console.WriteLine($"Loaded {overridePhases.Count} override phases");
-    }
-    else
-    {
-        overridePhases = new Dictionary<DateTime, OverridePhase>();
-    }
-    
-    //
-    // Find the maximum number of phases to add.
-    //
-    
-    DateTime endTime = baseTime.AddDays(scheduleLength);
-    
-    loopTime = baseTime;
-    
-    for (int i = 0; i < currentPhases.Count; i++)
-    {
-        GambitVersusPhase phase = currentPhases[i];
-
-        // This is the most convenient place to do this.
-        if (overridePhases.TryGetValue(loopTime, out OverridePhase? overridePhase))
-        {
-            phase.ApplyOverridePhase(overridePhase);
-        }
-        
-        loopTime = loopTime.AddHours(phase.Length);
-    }
-
-    DateTime newPhaseBaseTime = loopTime;
-
-    int maximumPhases = currentPhases.Count;
-
-    // This definitely isn't the most efficient way to do this, but it works.
-    while (endTime > loopTime)
-    {
-        maximumPhases++;
-        
-        int length;
-        
-        if (overridePhases.TryGetValue(loopTime, out OverridePhase? phase))
-        {
-            length = phase.Length;
-        }
-        else
-        {
-            length = phaseLength;
-        }
-        
-        loopTime = loopTime.AddHours(length);
-    }
-    
-    if (maximumPhases > 256)
-    {
-        throw new Exception("Gambit can only load up to 256 rotations at a time");
-    }
-
-    Console.WriteLine($"Generating {maximumPhases} phases to reach {endTime:O} (already have {currentPhases.Count})");
-    
-    //
-    // Generate new phases to fill out the schedule
-    //
-
-    List<VersusRule> gachiRulePool = new List<VersusRule>();
-    Dictionary<VersusRule, List<int>> stagePools = new Dictionary<VersusRule, List<int>>()
-    {
-        { VersusRule.Paint, new List<int>() },
-        { VersusRule.Goal, new List<int>() },
-        { VersusRule.Area, new List<int>() },
-        { VersusRule.Lift, new List<int>() }
-    };
-
-    DateTime currentTime = newPhaseBaseTime;
-
-    for (int i = currentPhases.Count; i < maximumPhases; i++)
-    {
-        GambitVersusPhase currentPhase = new GambitVersusPhase();
-        GambitVersusPhase lastPhase = i != 0 ? currentPhases[i - 1] : new GambitVersusPhase();
-
-        if (overridePhases.TryGetValue(currentTime, out OverridePhase? overridePhase))
-        {
-            currentPhase.ApplyOverridePhase(overridePhase);
-        }
-        
-        // Calculate next phase time
-        
-        if (currentPhase.Length <= 0)
-        {
-            currentPhase.Length = phaseLength;
-        }
-        
-        DateTime nextPhaseTime = currentTime.AddHours(currentPhase.Length);
-        
-        // Grab the next override phase for later use
-
-        overridePhases.TryGetValue(nextPhaseTime, out OverridePhase? nextOverridePhase);
-        
-        // Populate rules and stages
-
-        currentPhase.RegularInfo.Rule = VersusRule.Paint;
-
-        for (int j = currentPhase.RegularInfo.Stages.Count; j < 2; j++)
-        {
-            currentPhase.RegularInfo.Stages.Add(PickStage(currentPhase, lastPhase, nextOverridePhase, VersusRule.Paint,
-                stagePools[VersusRule.Paint], random));
-        }
-        
-        currentPhase.RegularInfo.Stages.Sort();
-        
-        if (currentPhase.GachiInfo.Rule == VersusRule.None)
-        {
-            currentPhase.GachiInfo.Rule = PickGachiRule(currentPhase.GachiInfo, lastPhase.GachiInfo, nextOverridePhase,
-                gachiRulePool, random);
-        }
-        
-        for (int j = currentPhase.GachiInfo.Stages.Count; j < 2; j++)
-        {
-            currentPhase.GachiInfo.Stages.Add(PickStage(currentPhase, lastPhase, nextOverridePhase,
-                currentPhase.GachiInfo.Rule, stagePools[currentPhase.GachiInfo.Rule], random));
-        }
-        
-        currentPhase.GachiInfo.Stages.Sort();
-        
-        currentPhases.Add(currentPhase);
-
-        currentTime = nextPhaseTime;
-    }
-    
-    //
-    // Write BYAML
-    //
-    
-    // As a fallback in case the schedule isn't updated in time, make the last phase 10 years long.
-    currentPhases.Last().Length = 24 * 365 * 10;
-
-    // Set the new base DateTime (this is usually in the JST time zone, but it accepts UTC time as well).
-    lastByaml["DateTime"] = baseTime.ToString("yyyy-MM-dd'T'HH:mm:ssK");
-
-    // Set the new phases.
-    lastByaml["Phases"] = currentPhases.Select(p => p.ToByamlPhase());
-    
-    // Add some metadata about this BYAML file and how it was built.
-    lastByaml["ByamlInfo"] = new Dictionary<string, dynamic>()
-    {
-        { "Generator", "Rotationator 1" },
-        { "GenerationTime", referenceNow.ToString("O") },
-        { "BaseByamlStartTime", baseTime.ToString("O") },
-        { "PhaseLength", phaseLength },
-        { "ScheduleLength", scheduleLength },
-        { "RandomSeed", seed.ToString() }
-    };
-    
-    ByamlFile.Save(outputByamlPath, lastByaml, new ByamlSerializerSettings()
-    {
-        ByteOrder = ByteOrder.BigEndian,
-        SupportsBinaryData = false,
-        Version = ByamlVersion.One
-    });
-
-    File.WriteAllText(outputByamlPath + ".json", JsonSerializer.Serialize(lastByaml, new JsonSerializerOptions()
-    {
-        WriteIndented = true
-    }));
-
-    string humanReadablePath = outputByamlPath + ".txt";
-
-    if (File.Exists(humanReadablePath))
-    {
-        File.Delete(humanReadablePath);
-    }
-    
-    using FileStream humanReadableStream = File.OpenWrite(humanReadablePath);
-    using StreamWriter humanReadableWriter = new StreamWriter(humanReadableStream);
-
-    DateTime humanReadableTime = baseTime;
-
-    foreach (GambitVersusPhase phase in currentPhases)
-    {
-        humanReadableWriter.Write(humanReadableTime.ToString("O"));
-        humanReadableWriter.WriteLine($" ({phase.Length} hours)");
-        humanReadableWriter.Write("Regular: ");
-        humanReadableWriter.Write(LocalizeRule(phase.RegularInfo.Rule));
-        humanReadableWriter.Write(" / ");
-        humanReadableWriter.WriteLine(string.Join(", ", phase.RegularInfo.Stages.Select(s => LocalizeStage(s))));
-        humanReadableWriter.Write("Gachi: ");
-        humanReadableWriter.Write(LocalizeRule(phase.GachiInfo.Rule));
-        humanReadableWriter.Write(" / ");
-        humanReadableWriter.WriteLine(string.Join(", ", phase.GachiInfo.Stages.Select(s => LocalizeStage(s))));
-        humanReadableWriter.WriteLine();
-
-        humanReadableTime = humanReadableTime.AddHours(phase.Length);
-    }
-    
-    Console.WriteLine("Done!");
-}
-
-//
-// Utility function to pick a random element from a pool.
-//
-
-T GetRandomElementFromPool<T>(List<T> pool, Func<T, bool> validityChecker, SeadRandom random)
+Command lastPhase = new("info", "Outputs information about the last VSSetting BYAML file in JSON format.")
 {
-    T element;
-    int tries = 0;
-    
-    do
-    {
-        element = pool[random.GetInt32(pool.Count)];
-
-        tries++;
-
-        if (tries > 10000)
-        {
-            throw new Exception("Possible infinite loop detected in GetRandomElementFromPool");
-        }
-    } while (!validityChecker(element));
-    
-    pool.Remove(element);
-
-    return element;
-}
-
-//
-// Random stage + rule pickers.
-//
-
-VersusRule PickGachiRule(GambitStageInfo stageInfo, GambitStageInfo lastStageInfo, OverridePhase? nextPhaseOverride,
-    List<VersusRule> pool, SeadRandom random)
+    byamlArgument
+};
+lastPhase.SetHandler(context =>
 {
-    if (pool.Count == 0)
-    {
-        pool.AddRange(defaultGachiRulePool);
-    }
+    string byamlPath = context.ParseResult.GetValueForArgument(byamlArgument);
+    InfoCommand.Run(byamlPath);
+});
+rootCommand.AddCommand(lastPhase);
 
-    bool IsRuleValid(VersusRule rule)
-    {
-        if (nextPhaseOverride != null)
-        {
-            if (nextPhaseOverride.GachiRule == rule)
-            {
-                return false;
-            }
-        }
-        
-        return rule != lastStageInfo.Rule;
-    }
-
-    if (pool.All(r => !IsRuleValid(r)))
-    {
-        List<VersusRule> forbiddenRules = new List<VersusRule>()
-        {
-            lastStageInfo.Rule
-        };
-
-        if (nextPhaseOverride != null)
-        {
-            forbiddenRules.Add(nextPhaseOverride.GachiRule);
-        }
-
-        pool = defaultGachiRulePool.Except(forbiddenRules).ToList();
-    }
-
-    return GetRandomElementFromPool(pool, IsRuleValid, random);
-}
-
-int PickStage(GambitVersusPhase phase, GambitVersusPhase lastPhase, OverridePhase? nextPhaseOverride, VersusRule rule,
-    List<int> pool, SeadRandom random)
-{
-    List<int> bannedStagesForRule = bannedStages[rule];
-
-    if (pool.Count == 0)
-    {
-        pool.AddRange(defaultStagePool.Except(bannedStagesForRule));
-    }
-
-    bool IsStageValid(int stageId)
-    {
-        // Don't pick this stage if it's already used in this phase.
-        if (phase.RegularInfo.Stages.Contains(stageId) || phase.GachiInfo.Stages.Contains(stageId))
-        {
-            return false;
-        }
-
-        // Don't pick this stage if it's present in the last phase.
-        if (lastPhase.RegularInfo.Stages.Contains(stageId) || lastPhase.GachiInfo.Stages.Contains(stageId))
-        {
-            return false;
-        }
-
-        return true;
-    }
-
-    // Check if all of our options are invalid.
-    if (pool.All(i => !IsStageValid(i)))
-    {
-        // If so, pick a random stage from the default pool, excluding:
-        // - the current phase's stages (in both Regular and Gachi)
-        // - the last phase's stages (in both Regular and Gachi)
-        // - the next phase's stages (in both Regular and Gachi, if known)
-        // - all banned stages for this rule
-        IEnumerable<int> newPool = defaultStagePool.Except(phase.RegularInfo.Stages)
-            .Except(phase.GachiInfo.Stages)
-            .Except(lastPhase.RegularInfo.Stages)
-            .Except(lastPhase.GachiInfo.Stages)
-            .Except(bannedStagesForRule);
-
-        if (nextPhaseOverride != null)
-        {
-            newPool = newPool.Except(nextPhaseOverride.RegularStages)
-                .Except(nextPhaseOverride.GachiStages);
-        }
-
-        pool = newPool.ToList();
-    }
-
-    return GetRandomElementFromPool(pool, IsStageValid, random);
-}
-
-string LocalizeStage(int id)
-{
-    switch (id)
-    {
-        case 0:
-            return "Urchin Underpass";
-        case 1:
-            return "Walleye Warehouse";
-        case 2:
-            return "Saltspray Rig";
-        case 3:
-            return "Arowana Mall";
-        case 4:
-            return "Blackbelly Skatepark";
-        case 5:
-            return "Camp Triggerfish";
-        case 6:
-            return "Port Mackerel";
-        case 7:
-            return "Kelp Dome";
-        case 8:
-            return "Moray Towers";
-        case 9:
-            return "Bluefin Depot";
-        case 10:
-            return "Hammerhead Bridge";
-        case 11:
-            return "Flounder Heights";
-        case 12:
-            return "Museum d'Alfonsino";
-        case 13:
-            return "Ancho-V Games";
-        case 14:
-            return "Piranha Pit";
-        case 15:
-            return "Mahi-Mahi Resort";
-        default:
-            throw new Exception($"Unknown stage {id}");
-    }
-}
-
-string LocalizeRule(VersusRule rule)
-{
-    switch (rule)
-    {
-        case VersusRule.None:
-            return "None";
-        case VersusRule.Paint:
-            return "Turf War";
-        case VersusRule.Goal:
-            return "Rainmaker";
-        case VersusRule.Area:
-            return "Splat Zones";
-        case VersusRule.Lift:
-            return "Tower Control";
-        default:
-            throw new Exception($"Unknown rule {rule}");
-    }
-}
+rootCommand.Invoke(args);

@@ -562,3 +562,5 @@ $RECYCLE.BIN/
 
 # All of Rider
 .idea
+
+*.byaml*
